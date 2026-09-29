@@ -1,23 +1,25 @@
-import { useEffect, useRef, useState } from "react";
+// src/pages/BenchPage.tsx
+import { useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import Papa from "papaparse";
-import type { Column } from "./store/types";
-import { inferKind, makeColumn } from "./store/infer";
-import "./App.css";
+import type { Column } from "../store/types";
+import { inferKind, makeColumn } from "../store/infer";
+import { FrameCounter } from "../components/FrameCounter";
 
-// In App.tsx
-import CsvWorker from './worker/csv.worker?worker';
-import type { Response } from './worker/protocol';
-
-// One panel per loading strategy. Each keeps its own log, which is only
-// replaced when a new file is picked in that same panel.
-type Lane = "naive" | "columnar" | "worker";
+// The two main-thread strategies, kept side by side for comparison. The
+// worker strategy isn't here: it now runs through the app-wide worker on
+// the Load page, and a second worker here would parse a second copy.
+type Lane = "naive" | "columnar";
 type Logs = Record<Lane, string[]>;
 
 const PANELS: { lane: Lane; title: string; hint: string }[] = [
   { lane: "naive", title: "Naive", hint: "Whole file to string, parsed on the main thread" },
   { lane: "columnar", title: "Columnar", hint: "Typed columns, still on the main thread" },
-  { lane: "worker", title: "Worker", hint: "Streamed and parsed off the main thread" },
 ];
+
+// performance.memory is Chrome-only and missing from the DOM typings.
+type PerformanceWithMemory = Performance & { memory?: { usedJSHeapSize: number } };
+
 
 // navigator.clipboard only exists in secure contexts (https / localhost).
 // Opening the dev server from a phone over the LAN is plain http, so fall
@@ -47,11 +49,17 @@ function formatLane(title: string, hint: string, lines: string[]): string {
   return `## ${title} — ${hint}\n${body}`;
 }
 
-export default function App() {
-  const workerRef = useRef<Worker | null>(null);
+// Row fetched by each panel's "row 400k" button.
+const PROBE_ROW = 400_000;
 
-  const [logs, setLogs] = useState<Logs>({ naive: [], columnar: [], worker: [] });
-  const [frames, setFrames] = useState(0);
+export function BenchPage() {
+  const [logs, setLogs] = useState<Logs>({ naive: [], columnar: [] });
+
+  // What each panel loaded, kept so its "row 400k" button reads its own file.
+  // Note the naive rows keep ~278MB of row objects alive until the next load.
+  const naiveRows = useRef<Record<string, string>[] | null>(null);
+  const columnarStore = useRef<{ columns: Column[]; rows: number } | null>(null);
+  // Written by <FrameCounter> every frame; read by "Am I responsive?".
   const framesRef = useRef(0);
 
   const reset = (lane: Lane, ...msgs: string[]) =>
@@ -59,27 +67,12 @@ export default function App() {
   const say = (lane: Lane, ...msgs: string[]) =>
     setLogs((l) => ({ ...l, [lane]: [...l[lane], ...msgs] }));
 
-  // Same liveness probe as before. Note it now runs through React state,
-  // which adds a re-render per frame — a small cost, but it's exactly the
-  // ambiguity I warned about: some of what you see in the profile is now
-  // React's, not yours. Live with it for the baseline; it doesn't change
-  // the headline number, because a 4-second block dwarfs React's overhead.
-  useEffect(() => {
-    let id: number;
-    const tick = () => {
-      framesRef.current += 1;
-      // setFrames(framesRef.current);
-      id = requestAnimationFrame(tick);
-    };
-    id = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(id);
-  }, []);
-
   const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     reset("naive", `file: ${(file.size / 1e6).toFixed(1)}MB`);
+    naiveRows.current = null;
     const t0 = performance.now();
 
     const text = await file.text();
@@ -114,10 +107,11 @@ export default function App() {
     );
     const tRead = performance.now();
 
-    const parsed = Papa.parse(text, { header: true, skipEmptyLines: true });
+    const parsed = Papa.parse<Record<string, string>>(text, { header: true, skipEmptyLines: true });
     const tParse = performance.now();
+    naiveRows.current = parsed.data;
 
-    const mem = (performance as any).memory;
+    const mem = (performance as PerformanceWithMemory).memory;
     say(
       "naive",
       `read into string: ${(tRead - t0).toFixed(0)}ms`,
@@ -133,6 +127,7 @@ export default function App() {
     if (!file) return;
 
     reset("columnar", `file: ${(file.size / 1e6).toFixed(1)}MB`);
+    columnarStore.current = null;
      const t0 = performance.now();
     const text = await file.text(); // still main thread — Part 4 fixes this
     const tRead = performance.now();
@@ -169,6 +164,9 @@ export default function App() {
 
     for (const c of columns) c.finalize();
     const tParse = performance.now();
+    // Columns have no length of their own, and get() past the end misreads
+    // (a blob column returns the whole buffer), so remember the row count.
+    columnarStore.current = { columns, rows: n - 1 };
 
     const total = columns.reduce((sum, c) => sum + c.bytes(), 0);
     console.table(
@@ -186,47 +184,30 @@ export default function App() {
     );
   }
 
-  const [ progress, setProgress] = useState(0);
-  useEffect(() => {
-  const w = new CsvWorker();
-  w.onmessage = (e: MessageEvent<Response>) => {
-    const msg = e.data;
-    if (msg.type === 'progress') setProgress(msg.rows);
-    else if (msg.type === 'loaded') {
-      const t = msg.timings;
-      say("worker",
-        `loaded ${msg.rows} rows in ${msg.ms.toFixed(0)}ms`,
-        `  read (to first chunk): ${t.read.toFixed(0)}ms`,
-        `  infer column types:    ${t.infer.toFixed(0)}ms`,
-        `  parse rows:            ${t.parse.toFixed(0)}ms`,
-        `  finalize:              ${t.finalize.toFixed(0)}ms`,
-        `retained ${(msg.bytes / 1e6).toFixed(1)}MB`,
-      );
-      w.postMessage({ type: 'page', start: 0, count: 50 });
-    }
-    else if (msg.type === 'page') console.log(msg.rows);
-    else if (msg.type === 'filtered') {
-      say("worker", `${msg.matched} matches in ${msg.ms.toFixed(0)}ms`);
-      w.postMessage({ type: 'page', start: 0, count: 50 });
-    }
-    else if (msg.type === 'error') say("worker", `error: ${msg.message}`);
+  const showRow = (lane: Lane, i: number, row: unknown) => {
+    console.log(`${lane} row ${i}:`, row);
+    say(lane, `row ${i}: ${JSON.stringify(row)}`);
   };
-  workerRef.current = w;
-  return () => w.terminate();
-}, []);
 
-const onWorkerFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
-  reset("worker", `file: ${(file.size / 1e6).toFixed(1)}MB`);
-  setProgress(0);
-  workerRef.current?.postMessage({ type: 'load', file });
-};
+  // Each panel reads row i from its own loaded file.
+  const probeRow: Record<Lane, (i: number) => void> = {
+    naive: (i) => {
+      const rows = naiveRows.current;
+      if (!rows) return say("naive", "load a file first");
+      if (i >= rows.length) return say("naive", `no row ${i} (only ${rows.length})`);
+      showRow("naive", i, rows[i]);
+    },
+    columnar: (i) => {
+      const store = columnarStore.current;
+      if (!store) return say("columnar", "load a file first");
+      if (i >= store.rows) return say("columnar", `no row ${i} (only ${store.rows})`);
+      showRow("columnar", i, Object.fromEntries(store.columns.map((c) => [c.name, c.get(i)])));
+    },
+  };
 
   const handlers: Record<Lane, (e: React.ChangeEvent<HTMLInputElement>) => void> = {
     naive: onFile,
     columnar: loadColumnar,
-    worker: onWorkerFile,
   };
 
   // Which copy button last fired, and whether it worked. Cleared after a
@@ -256,9 +237,10 @@ const onWorkerFile = (e: React.ChangeEvent<HTMLInputElement>) => {
 
   return (
     <div className="workspace">
-      <div className="frames">frames: {frames}</div>
+      <FrameCounter framesRef={framesRef} />
       <h1>CSV Workspace — baseline</h1>
       <div className="toolbar">
+        <Link to="/">← Load page</Link>
         <button className="copy-all" onClick={copyAll} disabled={!hasAnyLog}>
           {copyLabel("all", "Copy all logs")}
         </button>
@@ -275,9 +257,9 @@ const onWorkerFile = (e: React.ChangeEvent<HTMLInputElement>) => {
             >
               Am I responsive?
             </button>
-            {lane === "worker" && progress > 0 && (
-              <div className="progress">worker rows parsed: {progress}</div>
-            )}
+            <button className="probe" onClick={() => probeRow[lane](PROBE_ROW)}>
+              row 400k
+            </button>
             <div className="log-head">
               <span>Log</span>
               <button

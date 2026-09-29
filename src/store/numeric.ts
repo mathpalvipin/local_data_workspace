@@ -42,8 +42,21 @@ export function int32Column(name: string): Column {
   };
 }
 
+// Float32 holds ~7 significant digits; decimals beyond that are binary noise
+// from the float, not data from the file.
+const MAX_DECIMALS = 7;
+
 export function float32Column(name: string): Column {
   let data = new Float32Array(1024);
+  // Decimal places each value had in the file, so get() prints every value
+  // exactly as written: "56.4" stays "56.4" and "56.40" stays "56.40".
+  // Costs 1 byte per row (~0.5MB for 500k rows).
+  // Rejected: one max-decimals count for the whole column. It's free, but it
+  // pads shorter values with zeros ("56.4" → "56.40"), so the grid would
+  // disagree with the file. Also rejected: the shortest decimal that maps
+  // back to the same float32. It needs no extra memory, but it drops
+  // trailing zeros the file had ("56.40" → "56.4").
+  let decs = new Uint8Array(1024);
   let len = 0;
 
   return {
@@ -54,17 +67,42 @@ export function float32Column(name: string): Column {
         const bigger = new Float32Array(data.length * 2);
         bigger.set(data);
         data = bigger;
+        const biggerDecs = new Uint8Array(decs.length * 2);
+        biggerDecs.set(decs);
+        decs = biggerDecs;
       }
-      data[len++] = raw === '' ? NaN : Number(raw);
+      if (raw === '') { decs[len] = 0; data[len++] = NaN; return; }
+
+      // Count the digits after the dot, stopping at anything else (the "e" in
+      // "1.5e3"). charCodeAt, not a regex: this runs once per row.
+      let d = 0;
+      const dot = raw.indexOf('.');
+      if (dot !== -1) {
+        for (let i = dot + 1; i < raw.length; i++) {
+          const ch = raw.charCodeAt(i);
+          if (ch < 48 || ch > 57) break;
+          d++;
+        }
+      }
+      decs[len] = Math.min(d, MAX_DECIMALS);
+      data[len++] = Number(raw);
     },
     finalize() {
-      if (len < data.length) data = data.slice(0, len);
+      if (len < data.length) {
+        data = data.slice(0, len);
+        decs = decs.slice(0, len);
+      }
     },
     get(row) {
       const v = data[row];
-      return Number.isNaN(v) ? null : v;
+      // toFixed, not the raw number. 56.45 is stored as the nearest float32,
+      // 56.450000762939453, and String(v) would print all of that. Rounding
+      // to this value's own decimal count gives back the file's text.
+      // Cost: this returns a string. A numeric sort must use Number(get(i)),
+      // or better, read the typed array directly.
+      return Number.isNaN(v) ? null : v.toFixed(decs[row]);
     },
-    bytes() { return data.byteLength; },
+    bytes() { return data.byteLength + decs.byteLength; },
   };
 }
 

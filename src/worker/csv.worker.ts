@@ -85,7 +85,7 @@ function load(file: File) {
         rowCount++;
       }
 
-    //   send({ type: 'progress', rows: rowCount });
+      send({ type: 'progress', rows: rowCount });
     },
     complete: () => {
       const t3 = performance.now();   // parsing all rows
