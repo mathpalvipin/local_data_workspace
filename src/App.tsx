@@ -68,7 +68,7 @@ export default function App() {
     let id: number;
     const tick = () => {
       framesRef.current += 1;
-      setFrames(framesRef.current);
+      // setFrames(framesRef.current);
       id = requestAnimationFrame(tick);
     };
     id = requestAnimationFrame(tick);
