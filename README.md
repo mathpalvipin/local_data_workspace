@@ -36,7 +36,12 @@ Open the dev server URL, pick `data/large.csv` (or any CSV with a header row) on
 | `npm run build` | Type-check (`tsc -b`) and build for production |
 | `npm run preview` | Serve the production build |
 | `npm run lint` | Run Oxlint |
+| `npm test` | Run the test suite once (Vitest + jsdom) |
+| `npm run test:watch` | Re-run tests on change |
+| `npm run test:coverage` | Run tests with a coverage report in `coverage/`; fails below 80% |
 | `npm run generate` | Generate the test CSV |
+
+Tests sit next to the code they cover (`*.test.ts[x]`), with shared helpers in `src/test/`: a fake worker, `ResizeObserver` / scroll / `requestAnimationFrame` stubs, and a page renderer with a hand-built worker context. One test is marked `it.fails` on purpose: it pins the known row-skipping bug in `csv.worker.ts`, and should be flipped to `it` once the bug is fixed.
 
 To type-check without building, use `npx tsc -b`. Plain `npx tsc --noEmit` checks nothing here, because the root `tsconfig.json` only holds project references.
 

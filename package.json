@@ -8,7 +8,10 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "generate": "node scripts/csvgenerate.mjs"
+    "generate": "node scripts/csvgenerate.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@types/papaparse": "^5.5.2",
@@ -18,12 +21,17 @@
     "react-router-dom": "^7.18.4"
   },
   "devDependencies": {
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.4",
+    "@vitest/coverage-v8": "^5.0.2",
+    "jsdom": "^29.1.1",
     "oxlint": "^1.75.0",
     "typescript": "~6.0.2",
-    "vite": "^8.2.0"
+    "vite": "^8.2.0",
+    "vitest": "^5.0.2"
   }
 }
