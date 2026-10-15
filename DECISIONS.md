@@ -165,8 +165,22 @@ warm-up:
 `daysFromCivil` matches `Date.UTC` for every day 1900-01-01 → 2100-12-31
 (73,414 days, 0 mismatches). The `Date.UTC` version is kept as a comment in
 `numeric.ts` for comparison. Trade-off: a formula the reader must trust, in
-exchange for halving the date column's parse cost. *Not yet measured inside
-the worker's full load.*
+exchange for halving the date column's parse cost.
+
+Measured inside the real worker load too (headless Chrome, production
+build, full 49MB file, 7 cold loads per variant, run twice in opposite
+orders to rule out ordering effects; setup in Part 7):
+
+| variant | median `parse` | run 1 | run 2 |
+|---|---|---|---|
+| `Date.UTC` | ~5,815ms | 5,835ms | 5,798ms |
+| `daysFromCivil` | ~5,595ms | 5,612ms | 5,580ms |
+
+**~220ms (~4%) faster per load**, in both orders. That is more than the
+~33ms the Node micro-benchmark predicted for two date columns. The gap is
+not explained yet; the micro-benchmark measured the conversion in
+isolation, while the real load runs it interleaved with parsing and
+column pushes.
 
 ### UTF-8 blob + offsets for high-cardinality strings
 `email` has 500k distinct values, so a dictionary would be as large as the
@@ -347,8 +361,8 @@ aren't worth taking on yet.
 ## Part 6 — Virtual grid
 
 No virtualization library (`react-window`, `@tanstack/react-virtual`): this
-is the part of the project being demonstrated. *All choices below are not
-yet measured with a profile.*
+is the part of the project being demonstrated. Scroll measurements are in
+Part 7.
 
 ### Fixed 32px rows, pure geometry
 `grid/geometry.ts` turns `scrollTop` into a row range with division:
@@ -360,12 +374,26 @@ The spacer is `rowCount × 32px` = 16,000,000px for this file: inside
 Chrome's ~33.5M px element limit, but close to Firefox's ~17.9M, which
 caps the current approach at roughly 560k rows there.
 
-### `transform: translateY`, never `top` / `margin-top`
-A transform is applied by the compositor and skips Layout. `top` is
-geometry, so changing it on every scroll event forces a layout pass over
-~50 rows × 10 cells. The offset derives from `start`, not `scrollTop`:
-`start` is OVERSCAN rows above the first visible row, so offsetting by
-`scrollTop` would draw everything 320px too low.
+### `transform: translateY` for the row window — measured, and no faster here
+The original reasoning: a transform is applied by the compositor and skips
+Layout, while `top` is geometry, so changing it on every scroll event would
+force a layout pass.
+
+**The measurement disproved that for this grid** (Part 7): a `top` build
+and a `transform` build ran the same number of layouts in the same time,
+for both a fast and a slow scroll. The reason is the design itself. The
+offset derives from `start`, a whole-row index, so it only changes when the
+set of rendered rows changes, and new rows need Layout regardless of how
+the block is positioned. `top` never changes on a scroll event that doesn't
+also change the rows.
+
+Kept as `transform` because it costs nothing and would matter if the offset
+ever became pixel-continuous (e.g. smooth sub-row positioning), but it is
+not a performance win in this design.
+
+The offset derives from `start`, not `scrollTop`: `start` is OVERSCAN rows
+above the first visible row, so offsetting by `scrollTop` would draw
+everything 320px too low.
 
 ### Scroll handler not throttled
 Every scroll event sets state so the rendered window never lags the
@@ -410,23 +438,101 @@ scroll event would snap back). *Rejected:* a `scrollToRow` prop (clicking
 the same jump twice after scrolling away wouldn't change the prop, so
 nothing would happen).
 
+### Filter bar on the Preview page
+Filtering runs in the worker, next to the data; only `{ matched, ms }`
+comes back and the grid pages through the matches like any other rows.
+`useFilter` owns the UI side:
+
+- **The grid is remounted on each result** (`key = seq`), which resets its
+  page cache (the old pages hold the old row order) and scroll position.
+  *Rejected:* exposing `invalidate()` and scroll reset from the grid, which
+  leaks its internals into the page.
+- **The grid's row count switches only when the worker confirms**, not when
+  the user clicks Apply. Switching early would page the old result with the
+  new count until the reply lands.
+- **A `clearFilter` message was added to the protocol**, and the filter is
+  cleared when the Preview page unmounts. The worker keeps `matches` across
+  navigation, so leaving with a filter on would make the next visit page
+  through matches while showing the full row count.
+- **`gt` / `lt` compare as numbers only for `int32` / `float32`**, and as
+  text otherwise, which is chronological for ISO dates. The old numeric-only
+  comparison made every date filter match nothing (`Number("2021-03-09")`
+  is NaN).
+
+---
+
+## Part 7 — Measurements in a real browser
+
+### Setup
+Headless Chrome (installed Chrome, driven by `puppeteer-core`) against
+production builds served by `vite preview`, on the development laptop.
+Background-throttling switches were turned off. To compare variants, each
+alternative was built from the same tree with one file patched (the
+`Date.UTC` lines in `numeric.ts`, or `top` instead of `transform` in
+`Grid.tsx`), so only that change differs. The worker's own `loaded` message
+supplied the phase timings.
+
+**This laptop is slower than the machine behind the Part 2–4 numbers.** The
+same parse-and-fill loop in plain Node takes 2.6–3.7s here, and a full
+worker load takes ~6.0s against the 2,179ms recorded in Part 4. Compare
+numbers within this part, not against earlier parts.
+
+### Load (7 cold loads, fresh page and worker each)
+```
+rows:                 500,000   (all rows kept: the sample-replay fix holds)
+retained:             32.8MB    (32.3MB + the per-value decimals array)
+read (first chunk):   ~400ms
+infer column types:   ~9ms
+parse rows:           ~5,600ms
+finalize:             ~18ms
+total:                ~6,020ms
+```
+
+### Scroll: `transform` vs `top` (240 scripted frames, median of 5 runs)
+| scroll | build | layouts | layout time | frame mean | frame p95 |
+|---|---|---|---|---|---|
+| fast, 2,000px/frame | `transform` | 238 | 2,551ms | 31.8ms | 36.6ms |
+| fast, 2,000px/frame | `top` | 238 | 2,489ms | 30.0ms | 36.3ms |
+| slow, 4px/frame | `transform` | 29 | 27ms | 18.0ms | 18.1ms |
+| slow, 4px/frame | `top` | 29 | 21ms | 18.0ms | 18.2ms |
+
+- **No difference between `transform` and `top`.** See Part 6 for why.
+- **Slow scroll:** 29 layouts in 240 frames, one per row change
+  (240 × 4px ÷ 32px = 30). Frames between row changes do no layout at all.
+- **Fast scroll is limited by Layout of new rows**, not by positioning:
+  ~10.6ms of Layout per frame to build ~50 fresh rows × 10 cells, giving
+  ~31 fps on this laptop. The next optimization, if one is needed, is
+  fewer DOM nodes per row (e.g. one text node per row, or canvas), not the
+  positioning property.
+
+### Filters (full file, median of 5)
+| filter | matches | time |
+|---|---|---|
+| `region = us-east` (dictionary) | 94,837 | 49ms |
+| `balance < 1000` (int32) | 1,292 | 54ms |
+| `score = 56.45` (float32) | 0 | 197ms |
+| `score > 50` (float32) | 240,957 | 292ms |
+| `email contains user4` (blob) | 111,111 | 764ms |
+| `signup_date > 2024-01-01` (date) | 138,803 | 1,812ms |
+
+`score = 56.45` matching 0 is correct: the seeded generator never produced
+that value (`48.69` appears 430 times). Every column type except
+dictionary and int32 misses a 100ms target, because `filter()` goes through
+`get()`, which formats a string per row: `toFixed` for floats, UTF-8
+decoding for blobs, and a `Date` plus ISO string for dates.
+
 ---
 
 ## Known limitations
 
 Things this system does not currently handle, with the fix sketched.
 
+Fixed since the first draft of this list: rows skipped when the inference
+sample spanned chunks (2,967 of 3,000 kept; now all, with a regression
+test), load errors never reported (now an `error` callback plus guarded
+chunk/complete callbacks), and `gt` / `lt` date filters matching nothing.
+
 **Correctness**
-- **Rows can be skipped if the inference sample spans two chunks.** In
-  `csv.worker.ts`, `start += sampleRows.length` counts sample rows buffered
-  from *earlier* chunks too. With PapaParse's ~10MB local chunks, all 1000
-  sample rows land in the first chunk, so the test file is unaffected; a
-  smaller chunk size or very wide rows would lose rows. Fix: advance
-  `start` only by the rows taken from the current chunk.
-- **Load errors are never reported.** The worker has no PapaParse `error`
-  callback, and the `try/catch` in `onmessage` doesn't cover the async
-  `chunk`/`complete` callbacks. A read or parse failure leaves the UI on
-  "Parsing…" forever. Fix: add `error:` and wrap the callback bodies.
 - **Dictionary codes are `Uint8`** — breaks silently past 256 distinct
   values, and there is no detection. Fix: promote the codes array to
   `Uint16Array` on overflow, or fall back to blob encoding.
@@ -440,17 +546,17 @@ Things this system does not currently handle, with the fix sketched.
 - **Dates aren't validated.** Non-digits or `2023-13-45` produce a wrong day
   number instead of an empty value. Fix: range-check month and day before
   `daysFromCivil`.
-- **`gt` / `lt` filters on date columns match nothing.** `get()` returns an
-  ISO string and `Number("2021-03-09")` is NaN. Fix: compare the stored day
-  numbers.
 
 **Performance**
-- **Filtering a float column formats 500k strings.** `filter()` calls
-  `col.get(i)`, which now returns `toFixed` text. The same applies to
-  dictionary columns, where codes could be compared as integers. Fix: give
-  columns a typed comparison path that reads the arrays directly.
-- **Substring filtering over long text columns exceeds the 100ms target**
-  for the same reason: a `get()` plus `String()` per row.
+- **Filters format a string per row** (measured in Part 7): date `>` takes
+  1,812ms, blob `contains` 764ms, float `>` 292ms on 500k rows, against a
+  100ms target. `filter()` calls `col.get(i)`, which builds a `Date` and
+  ISO string, decodes UTF-8, or calls `toFixed`. Fix: give columns a typed
+  comparison path that reads the arrays directly (compare day numbers,
+  float values, dictionary codes).
+- **Fast scrolling runs at ~31 fps on the dev laptop**, limited by Layout of
+  ~50 new rows × 10 cells per frame (Part 7). Fix if needed: fewer DOM
+  nodes per row, not a different positioning property.
 - **The page cache's listener is attached after first render.** Worked
   around in `Grid` (Part 6); the robust fix is for `usePageCache` to attach
   synchronously or re-request in-flight pages after subscribing.

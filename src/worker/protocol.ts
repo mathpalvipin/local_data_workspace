@@ -3,8 +3,11 @@
 /** Main thread → worker */
 export type Request =
   | { type: 'load'; file: File }
-  | { type: 'filter'; column: string; op: 'eq' | 'contains' | 'gt' | 'lt'; value: string }
+  | { type: 'filter'; column: string; op: FilterOp; value: string }
+  | { type: 'clearFilter' }   // replies 'filtered' with matched = all rows
   | { type: 'page'; start: number; count: number };
+
+export type FilterOp = 'eq' | 'contains' | 'gt' | 'lt';
 
 /** Worker → main thread */
 export type Response =

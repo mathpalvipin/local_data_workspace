@@ -150,11 +150,11 @@ export function Grid({ worker, rowCount, columns, ref }: GridProps) {
         </div>
 
         <div className="grid-spacer" style={{ height: totalHeight(rowCount) }}>
-          {/* Positioned with transform, never `top` / `margin-top`. A
-              transform is applied by the compositor and skips Layout; `top`
-              is geometry, so changing it on every scroll event forces a
-              layout pass over all ~50 rows × N cells, which shows up as jank
-              in a fast scroll.
+          {/* Positioned with transform. Measured against a `top` build
+              (DECISIONS.md, Part 7): no difference, because the offset only
+              changes when `start` changes, and then the rows change too and
+              need Layout anyway. Kept because it costs nothing and would
+              matter if the offset ever became pixel-continuous.
 
               The offset comes from `start`, not `scrollTop`. `start` is
               OVERSCAN rows above the first visible row, so offsetting by

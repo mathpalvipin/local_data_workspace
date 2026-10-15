@@ -13,7 +13,7 @@ const last = <T extends Response['type']>(type: T) =>
 
 async function load(csv: string) {
   send({ type: 'load', file: new File([csv], 'test.csv') });
-  await vi.waitFor(() => expect(last('loaded') ?? last('error')).toBeDefined());
+  await vi.waitFor(() => expect(last('loaded') ?? last('error')).toBeDefined(), { timeout: 10_000 });
   return last('loaded');
 }
 
@@ -117,14 +117,58 @@ describe('csv.worker', () => {
     expect(posted.filter((m) => m.type === 'progress').length).toBeGreaterThan(0);
   });
 
-  // Known bug (DECISIONS.md, Known limitations): when the 1000-row sample is
-  // completed mid-chunk after spanning earlier chunks, `start +=
-  // sampleRows.length` over-skips and drops the rest of that chunk.
-  // it.fails passes while the bug exists; flip it to `it` once fixed.
-  it.fails('keeps every row when the sample spans chunks (known bug)', async () => {
+  // Regression: the sample used to be skipped by its full length even when
+  // part of it came from earlier chunks, which kept 2,967 of 3,000 rows.
+  it('keeps every row, in order, when the sample spans chunks', async () => {
     Papa.LocalChunkSize = 4096;
     const rows = Array.from({ length: 3000 }, (_, i) => `${i},${i % 7}.5`);
     const loaded = await load(['id,v', ...rows].join('\n'));
     expect(loaded!.rows).toBe(3000);
+
+    send({ type: 'page', start: 995, count: 10 });
+    expect(last('page')?.rows.map((r) => r[0])).toEqual(
+      ['995', '996', '997', '998', '999', '1000', '1001', '1002', '1003', '1004'],
+    );
+    send({ type: 'page', start: 2999, count: 1 });
+    expect(last('page')?.rows[0][0]).toBe('2999');
+  });
+
+  it('filters dates chronologically with gt / lt', async () => {
+    await load(CSV);
+    send({ type: 'filter', column: 'signup', op: 'gt', value: '2022-01-01' });
+    expect(last('filtered')?.matched).toBe(2); // 2022-11-04, 2024-02-29
+    send({ type: 'filter', column: 'signup', op: 'lt', value: '2022-01-01' });
+    expect(last('filtered')?.matched).toBe(1); // 2021-03-09; the empty date is skipped
+  });
+
+  it('clearFilter goes back to every row', async () => {
+    await load(CSV);
+    send({ type: 'filter', column: 'region', op: 'eq', value: 'us-east' });
+    send({ type: 'clearFilter' });
+    expect(last('filtered')).toEqual({ type: 'filtered', matched: 4, ms: 0 });
+    send({ type: 'page', start: 0, count: 10 });
+    expect(last('page')?.rows).toHaveLength(4);
+  });
+
+  it('reports a read failure instead of hanging', () => {
+    vi.spyOn(Papa, 'parse').mockImplementation(((_file: File, config: Papa.ParseLocalConfig<string[], File>) => {
+      config.error?.(new Error('file was moved'), _file);
+    }) as never);
+    send({ type: 'load', file: new File(['x'], 'x.csv') });
+    expect(last('error')?.message).toBe('file was moved');
+  });
+
+  it('reports a failure inside a chunk, aborts, and never announces loaded', () => {
+    const abort = vi.fn();
+    vi.spyOn(Papa, 'parse').mockImplementation(((_file: File, config: Papa.ParseLocalConfig<string[], File>) => {
+      // A malformed chunk: `data` missing makes the handler throw.
+      config.chunk?.({ data: undefined } as never, { abort } as never);
+      config.complete?.({} as never, _file);
+    }) as never);
+    send({ type: 'load', file: new File(['x'], 'x.csv') });
+
+    expect(abort).toHaveBeenCalled();
+    expect(last('error')).toBeDefined();
+    expect(last('loaded')).toBeUndefined();
   });
 });

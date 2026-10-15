@@ -9,7 +9,7 @@ Built with React 19, TypeScript, Vite, React Router and [PapaParse](https://www.
 | Route | What it does |
 | --- | --- |
 | `/` **Load** | Pick a CSV. A Web Worker streams and parses it into a column store while a progress count rises. When it's done you see rows, retained memory and load time, and a **Preview** button. The page has an **Am I responsive?** button whose clicks are logged next to the output. |
-| `/preview` **Preview** | A virtual grid over all rows, with a sticky header and **row 4k / 40k / 400k** jump buttons. Only the visible rows (plus a small margin) exist in the DOM. Rows not fetched yet show as dimmed `—` placeholders. |
+| `/preview` **Preview** | A virtual grid over all rows, with a sticky header, **row 4k / 40k / 400k** jump buttons and a **filter bar** (column, `contains` / `=` / `>` / `<`, value). Filtering runs in the worker; the grid then shows only the matches. Only the visible rows (plus a small margin) exist in the DOM. Rows not fetched yet show as dimmed `—` placeholders. |
 | `/bench` **Bench** | The naive and columnar strategies on the main thread, side by side, each with its own file picker, log, **row 400k** probe and Copy button, plus **Copy all logs**. Use it to see the freeze the worker avoids. |
 
 A `frames:` counter in the corner goes up on every animation frame. If it stops, the main thread is blocked.
@@ -41,8 +41,7 @@ Open the dev server URL, pick `data/large.csv` (or any CSV with a header row) on
 | `npm run test:coverage` | Run tests with a coverage report in `coverage/`; fails below 80% |
 | `npm run generate` | Generate the test CSV |
 
-Tests sit next to the code they cover (`*.test.ts[x]`), with shared helpers in `src/test/`: a fake worker, `ResizeObserver` / scroll / `requestAnimationFrame` stubs, and a page renderer with a hand-built worker context. One test is marked `it.fails` on purpose: it pins the known row-skipping bug in `csv.worker.ts`, and should be flipped to `it` once the bug is fixed.
-
+Tests sit next to the code they cover (`*.test.ts[x]`), with shared helpers in `src/test/`: a fake worker, `ResizeObserver` / scroll / `requestAnimationFrame` stubs, and a page renderer with a hand-built worker context.
 To type-check without building, use `npx tsc -b`. Plain `npx tsc --noEmit` checks nothing here, because the root `tsconfig.json` only holds project references.
 
 ## How it works
@@ -121,11 +120,10 @@ For the test file this takes the retained size from ~278MB (one object per row) 
 Defined in `src/worker/protocol.ts`:
 
 - `load { file }` → `progress { rows }` per chunk, then `loaded { rows, columns, bytes, ms, timings }`, with timings split into read, infer, parse and finalize
-- `filter { column, op: eq | contains | gt | lt, value }` → `filtered { matched, ms }`. The matching row numbers stay in the worker.
+- `filter { column, op: eq | contains | gt | lt, value }` → `filtered { matched, ms }`. The matching row numbers stay in the worker. `gt`/`lt` compare numbers for numeric columns and text otherwise, which is chronological for ISO dates.
+- `clearFilter` → `filtered { matched: all rows, ms: 0 }`
 - `page { start, count }` → `page { start, rows }`, reading through the filter if one is active
-- `error { message }` if a request fails
-
-Filtering exists in the worker but has no UI yet.
+- `error { message }` if a request fails, including read and parse failures during a load
 
 ## Known limitations
 
@@ -133,11 +131,12 @@ The main ones are below. [`DECISIONS.md`](DECISIONS.md#known-limitations) has th
 
 - Column types are inferred from the first 1,000 rows only, with no fallback if a later value doesn't fit.
 - Dictionary columns break silently past 256 distinct values.
-- A read or parse error in the worker isn't reported, so the Load page stays on "Parsing…".
+- Filters on date, text and float columns are slow on 500k rows (0.3–1.8s measured), because each row is formatted as a string before comparing.
+- Fast scrolling runs at about 31 fps on a mid-range laptop, limited by laying out the new rows each frame.
 - Float columns hold about 7 significant digits (`3.1415926` shows as `3.1415925`).
 - The grid's scrollable height is limited by the browser (about 560k rows in Firefox).
 - Data isn't persisted. Reloading means loading the file again.
 
 ## Design notes
 
-[`DECISIONS.md`](DECISIONS.md) explains why things are built this way and records the measurements behind each step: the naive baseline, the A/B/C allocation experiment, the columnar store, the worker (including why it first appeared 3× slower), routing and worker lifetime, and the virtual grid.
+[`DECISIONS.md`](DECISIONS.md) explains why things are built this way and records the measurements behind each step: the naive baseline, the A/B/C allocation experiment, the columnar store, the worker (including why it first appeared 3× slower), routing and worker lifetime, the virtual grid and filter bar, and real-browser measurements of load, scroll and filter times (including the finding that `transform` vs `top` made no difference for this grid).

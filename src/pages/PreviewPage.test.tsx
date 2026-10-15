@@ -1,4 +1,4 @@
-import { fireEvent, screen } from '@testing-library/react';
+import { act, fireEvent, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { ROW_HEIGHT } from '../grid/geometry';
 import { createFakeWorker } from '../test/fakeWorker';
@@ -11,8 +11,8 @@ const columns = [
   { name: 'email', kind: 'blob', bytes: 20 },
 ];
 
-const ready = (rowCount: number) =>
-  workerState({ status: 'ready', worker: createFakeWorker().worker, rowCount, columns });
+const ready = (rowCount: number, fake = createFakeWorker()) =>
+  workerState({ status: 'ready', worker: fake.worker, rowCount, columns });
 
 describe('PreviewPage', () => {
   it.each(['idle', 'loading', 'error'] as const)('redirects to / when status is %s', (status) => {
@@ -44,6 +44,50 @@ describe('PreviewPage', () => {
     expect(screen.getByText<HTMLButtonElement>('row 4k').disabled).toBe(false);
     expect(screen.getByText<HTMLButtonElement>('row 40k').disabled).toBe(true);
     expect(screen.getByText<HTMLButtonElement>('row 400k').disabled).toBe(true);
+  });
+
+  it('applies a filter, shows the match count, and sizes the grid to the matches', () => {
+    stubResizeObserver();
+    const fake = createFakeWorker();
+    const { container } = renderPage(<PreviewPage />, '/preview', ready(1000, fake));
+
+    fireEvent.change(screen.getByLabelText('Column'), { target: { value: 'email' } });
+    fireEvent.change(screen.getByLabelText('Operator'), { target: { value: 'eq' } });
+    fireEvent.change(screen.getByLabelText('Value'), { target: { value: 'user1@example.com' } });
+    fireEvent.click(screen.getByText('Apply'));
+
+    expect(fake.postMessage).toHaveBeenCalledWith({
+      type: 'filter', column: 'email', op: 'eq', value: 'user1@example.com',
+    });
+    expect(screen.getByRole('status').textContent).toBe('Filtering…');
+    expect(screen.getByText<HTMLButtonElement>('Apply').disabled).toBe(true);
+
+    act(() => fake.reply({ type: 'filtered', matched: 3, ms: 4.2 }));
+
+    expect(screen.getByRole('status').textContent).toBe(`3 of ${(1000).toLocaleString()} rows match · 4ms`);
+    const spacer = container.querySelector<HTMLDivElement>('.grid-spacer')!;
+    expect(spacer.style.height).toBe(`${3 * ROW_HEIGHT}px`);
+    // Jumps past the matches are disabled.
+    expect(screen.getByText<HTMLButtonElement>('row 4k').disabled).toBe(true);
+  });
+
+  it('Clear returns to all rows', () => {
+    stubResizeObserver();
+    const fake = createFakeWorker();
+    const { container } = renderPage(<PreviewPage />, '/preview', ready(1000, fake));
+    expect(screen.getByText<HTMLButtonElement>('Clear').disabled).toBe(true);
+
+    fireEvent.change(screen.getByLabelText('Value'), { target: { value: 'x' } });
+    fireEvent.click(screen.getByText('Apply'));
+    act(() => fake.reply({ type: 'filtered', matched: 3, ms: 1 }));
+
+    fireEvent.click(screen.getByText('Clear'));
+    expect(fake.postMessage).toHaveBeenLastCalledWith({ type: 'clearFilter' });
+    act(() => fake.reply({ type: 'filtered', matched: 1000, ms: 0 }));
+
+    const spacer = container.querySelector<HTMLDivElement>('.grid-spacer')!;
+    expect(spacer.style.height).toBe(`${1000 * ROW_HEIGHT}px`);
+    expect(screen.getByRole('status').textContent).toBe('');
   });
 
   it('has a Back link to the load page', () => {

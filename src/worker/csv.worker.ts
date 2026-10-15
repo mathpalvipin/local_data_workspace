@@ -17,6 +17,7 @@ self.onmessage = (e: MessageEvent<Request>) => {
   try {
     if (req.type === 'load') load(req.file);
     else if (req.type === 'filter') filter(req);
+    else if (req.type === 'clearFilter') clearFilter();
     else if (req.type === 'page') page(req);
   } catch (err) {
     send({ type: 'error', message: String(err) });
@@ -38,73 +39,104 @@ function load(file: File) {
   let t1 = 0;
   let t2 = 0;
 
+  // The callbacks below run asynchronously, after onmessage's try/catch has
+  // already returned, so their failures must be reported from here. Once
+  // failed, `complete` (which PapaParse still calls after an abort) must not
+  // announce a half-built store as 'loaded'.
+  let failed = false;
+  const fail = (err: unknown) => {
+    failed = true;
+    columns = [];
+    rowCount = 0;
+    send({ type: 'error', message: err instanceof Error ? err.message : String(err) });
+  };
+
   // Passing `file` (not a string) makes PapaParse stream it.
   // We never hold the whole file in memory.
   Papa.parse<string[]>(file, {
     header: false,
     skipEmptyLines: true,
     worker: false,          // we ARE the worker; don't spawn another
-    chunk: (results) => {
-      if (t1 === 0) t1 = performance.now();   // reading the file
-      const rows = results.data;
-      let start = 0;
+    chunk: (results, parser) => {
+      try {
+        if (t1 === 0) t1 = performance.now();   // reading the file
+        const rows = results.data;
+        let start = 0;
 
-      if (!headers) {
-        headers = rows[0];
-        start = 1;
-      }
-
-      // Collect a sample before deciding column types. We may need
-      // more than one chunk's worth, so this is a small state machine.
-      if (!inferred) {
-        for (let i = start; i < rows.length && sampleRows.length < 1000; i++) {
-          sampleRows.push(rows[i]);
+        if (!headers) {
+          headers = rows[0];
+          start = 1;
         }
-        if (sampleRows.length >= 1000 || results.meta.cursor >= file.size) {
-          columns = headers!.map((name, i) =>
-            makeColumn(inferKind(sampleRows.map(r => r[i] ?? '')), name)
-          );
-          inferred = true;
-          t2 = performance.now();   // figuring out column types
-          // Replay the sample rows we buffered while deciding.
-          for (const row of sampleRows) {
-            for (let c = 0; c < columns.length; c++) columns[c].push(row[c] ?? '');
-            rowCount++;
+
+        // Collect a sample before deciding column types. We may need
+        // more than one chunk's worth, so this is a small state machine.
+        if (!inferred) {
+          // Rows taken from THIS chunk. sampleRows may also hold rows from
+          // earlier chunks, so its length is the wrong amount to skip:
+          // advancing by it dropped the rest of this chunk whenever the
+          // sample spanned chunks (2,967 of 3,000 rows kept in the test).
+          let taken = 0;
+          for (let i = start; i < rows.length && sampleRows.length < 1000; i++) {
+            sampleRows.push(rows[i]);
+            taken++;
           }
-          // Skip past the rows we just replayed in this chunk.
-          start += sampleRows.length;
-          sampleRows = [];
-        } else {
-          return;   // need more data before we can infer
+          if (sampleRows.length >= 1000 || results.meta.cursor >= file.size) {
+            columns = headers!.map((name, i) =>
+              makeColumn(inferKind(sampleRows.map(r => r[i] ?? '')), name)
+            );
+            inferred = true;
+            t2 = performance.now();   // figuring out column types
+            // Replay the sample rows we buffered while deciding.
+            for (const row of sampleRows) {
+              for (let c = 0; c < columns.length; c++) columns[c].push(row[c] ?? '');
+              rowCount++;
+            }
+            // Skip past only the rows this chunk contributed to the sample.
+            start += taken;
+            sampleRows = [];
+          } else {
+            return;   // need more data before we can infer
+          }
         }
-      }
 
-      for (let r = start; r < rows.length; r++) {
-        const row = rows[r];
-        for (let c = 0; c < columns.length; c++) columns[c].push(row[c] ?? '');
-        rowCount++;
-      }
+        for (let r = start; r < rows.length; r++) {
+          const row = rows[r];
+          for (let c = 0; c < columns.length; c++) columns[c].push(row[c] ?? '');
+          rowCount++;
+        }
 
-      send({ type: 'progress', rows: rowCount });
+        send({ type: 'progress', rows: rowCount });
+      } catch (err) {
+        fail(err);
+        parser.abort();
+      }
     },
+    // Read failures (e.g. the file was moved or deleted mid-load). Without
+    // this, the UI would wait on "Parsing…" forever.
+    error: (err) => fail(err),
     complete: () => {
-      const t3 = performance.now();   // parsing all rows
-      for (const c of columns) c.finalize();
-      const t4 = performance.now();   // cleanup
-      send({
-        type: 'loaded',
-        rows: rowCount,
-        columns: columns.map(c => ({ name: c.name, kind: c.kind, bytes: c.bytes() })),
-        bytes: columns.reduce((s, c) => s + c.bytes(), 0),
-        ms: t4 - t0,
-        timings: {
-          read: t1 - t0,
-          infer: t2 - t1,
-          parse: t3 - t2,
-          finalize: t4 - t3,
-          total: t4 - t0,
-        },
-      });
+      if (failed) return;
+      try {
+        const t3 = performance.now();   // parsing all rows
+        for (const c of columns) c.finalize();
+        const t4 = performance.now();   // cleanup
+        send({
+          type: 'loaded',
+          rows: rowCount,
+          columns: columns.map(c => ({ name: c.name, kind: c.kind, bytes: c.bytes() })),
+          bytes: columns.reduce((s, c) => s + c.bytes(), 0),
+          ms: t4 - t0,
+          timings: {
+            read: t1 - t0,
+            infer: t2 - t1,
+            parse: t3 - t2,
+            finalize: t4 - t3,
+            total: t4 - t0,
+          },
+        });
+      } catch (err) {
+        fail(err);
+      }
     },
   });
 }
@@ -119,6 +151,13 @@ function filter(req: Extract<Request, { type: 'filter' }>) {
   const out = new Uint32Array(rowCount);
   let n = 0;
 
+  // gt / lt compare as numbers only for numeric columns. Everything else
+  // compares as text, which is also correct for dates: ISO YYYY-MM-DD
+  // strings sort chronologically. Number("2021-03-09") is NaN, so the old
+  // numeric-only comparison made every date filter match nothing.
+  const numeric = col.kind === 'int32' || col.kind === 'float32';
+  const target = Number(req.value);
+
   for (let i = 0; i < rowCount; i++) {
     const v = col.get(i);
     if (v === null) continue;
@@ -126,13 +165,18 @@ function filter(req: Extract<Request, { type: 'filter' }>) {
     const hit =
       req.op === 'eq' ? s === req.value :
       req.op === 'contains' ? s.includes(req.value) :
-      req.op === 'gt' ? Number(v) > Number(req.value) :
-      Number(v) < Number(req.value);
+      req.op === 'gt' ? (numeric ? Number(v) > target : s > req.value) :
+      (numeric ? Number(v) < target : s < req.value);
     if (hit) out[n++] = i;
   }
 
   matches = out.slice(0, n);
   send({ type: 'filtered', matched: n, ms: performance.now() - t0 });
+}
+
+function clearFilter() {
+  matches = null;
+  send({ type: 'filtered', matched: rowCount, ms: 0 });
 }
 
 function page(req: Extract<Request, { type: 'page' }>) {
