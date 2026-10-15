@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "architecture",
+  "quality": "showcase",
+  "specification": {
+    "path": "V:\\Project\\local_data_workspace\\.archify\\architecture-csv-workspace-20261015-083342\\candidate.json",
+    "sha256": "7f5ef218e38884dfd6bd2654cf10cc350078deae429b5e207aa2f2e3103550ab",
+    "bytes": 7678
+  },
+  "artifact": {
+    "path": "V:\\Project\\local_data_workspace\\.archify\\architecture-csv-workspace-20261015-083342\\csv-workspace.html",
+    "sha256": "2434f99d2e11f34057419b2ece436c667714f80f85728eecfdc49a5ba6ee41eb",
+    "bytes": 836104
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "V:\\Project\\local_data_workspace\\.archify\\architecture-csv-workspace-20261015-083342\\csv-workspace.finalize.json",
+    "summaryReceipt": "V:\\Project\\local_data_workspace\\.archify\\architecture-csv-workspace-20261015-083342\\csv-workspace.finalize-summary.json",
+    "browserCheckReceipt": "V:\\Project\\local_data_workspace\\.archify\\architecture-csv-workspace-20261015-083342\\csv-workspace.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.1.0",
+    "availableVersion": "3.1.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-15T03:04:14.095Z",
+    "source": "network",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 6345
+}

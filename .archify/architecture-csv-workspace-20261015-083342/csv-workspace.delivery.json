@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "740151ad-aed4-47bf-9854-d33a58eaf862",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "V:\\Project\\local_data_workspace\\.archify\\architecture-csv-workspace-20261015-083342\\candidate.json",
+  "output": "V:\\Project\\local_data_workspace\\.archify\\architecture-csv-workspace-20261015-083342\\csv-workspace.html",
+  "specification": {
+    "sha256": "7f5ef218e38884dfd6bd2654cf10cc350078deae429b5e207aa2f2e3103550ab",
+    "bytes": 7678
+  },
+  "artifact": {
+    "sha256": "2434f99d2e11f34057419b2ece436c667714f80f85728eecfdc49a5ba6ee41eb",
+    "bytes": 836104
+  }
+}
