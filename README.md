@@ -44,6 +44,10 @@ Open the dev server URL, pick `data/large.csv` (or any CSV with a header row) on
 Tests sit next to the code they cover (`*.test.ts[x]`), with shared helpers in `src/test/`: a fake worker, `ResizeObserver` / scroll / `requestAnimationFrame` stubs, and a page renderer with a hand-built worker context.
 To type-check without building, use `npx tsc -b`. Plain `npx tsc --noEmit` checks nothing here, because the root `tsconfig.json` only holds project references.
 
+## Deploy
+
+Deployed on Vercel from this repository; every push to `main` redeploys. `vercel.json` runs `npm run build`, serves `dist/`, and rewrites unknown paths to `index.html` so that refreshing `/preview` or `/bench` loads the app instead of a 404 (the app then redirects to `/`, because nothing is loaded yet). No CSV is deployed: pick a file in the browser, or generate one locally with `npm run generate`.
+
 ## How it works
 
 ```
